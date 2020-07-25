@@ -14,8 +14,11 @@ import torchvision.transforms.functional as T
 from torch.utils.data import Dataset, DataLoader
 from dbface import DBFace
 
-
 class LDataset(Dataset):
+    """
+    Ground Truth annotations can be download from https://github.com/akofman/wider-face-pascal-voc-annotations.
+    Links: https://github.com/dlunion/DBFace/issues/18
+    """
     def __init__(self, labelfile, imagesdir, mean, std, width=800, height=800):
         
         self.width = width
@@ -160,7 +163,7 @@ class App(object):
         self.std = [0.289, 0.274, 0.278]
         self.batch_size = 18
         self.lr = 1e-4
-        self.gpus = [2] #[0, 1, 2, 3]
+        self.gpus = [1] # [0, 1, 2, 3]
         self.gpu_master = self.gpus[0]
         self.model = DBFace(has_landmark=True, wide=64, has_ext=True, upmode="UCBA")
         self.model.init_weights()
@@ -178,14 +181,12 @@ class App(object):
         self.iter = 0
         self.epochs = 150
 
-
     def set_lr(self, lr):
 
         self.lr = lr
         log.info(f"setting learning rate to: {lr}")
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
-
 
     def train_epoch(self, epoch):
         
@@ -244,8 +245,6 @@ class App(object):
                     common.drawbbox(im1, obj)
                 common.imwrite(f"{jobdir}/imgs/train_result.jpg", im1)
 
-
-
     def train(self):
 
         lr_scheduer = {
@@ -269,9 +268,10 @@ class App(object):
             torch.save(self.model.module.state_dict(), file)
 
 
-trial_name = "small-H-dense-wide64-UCBA-keep12-ignoresmall"
+trial_name = "exp1-small-H-dense-wide64-UCBA-keep12-ignoresmall"
 jobdir = f"jobs/{trial_name}"
 
 log = logger.create(trial_name, f"{jobdir}/logs/{trial_name}.log")
-app = App("webface/train/label.txt", "webface/WIDER_train/images")
+# app = App("webface/train/label.txt", "webface/WIDER_train/images")
+app = App("/data/deeplearning/wider_face/train/label.txt", "/data/deeplearning/wider_face/WIDER_train/images")
 app.train()

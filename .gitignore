@@ -5,4 +5,6 @@
 build/
 cmake-build-debug/
 README.ignore.md
-prj-ncnn_center/
+model/dbface.pth
+model/dbfaceSmallH.pth
+train/small/jobs/*
