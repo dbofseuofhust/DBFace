@@ -4,15 +4,10 @@ import torch.nn.functional as F
 import torchvision.models._utils as _utils
 import torchvision.models as models
 import math
+import torch.utils.model_zoo as model_zoo
 
-def _make_divisible(v, divisor, min_value=None):
-    if min_value is None:
-        min_value = divisor
-    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
-    # make sure that round down does not go down by more than 10%.
-    if new_v < 0.9 * v:
-        new_v += divisor
-    return new_v
+# refer: https://github.com/d-li14/mobilenetv2.pytorch
+_MODEL_URL = "https://raw.githubusercontent.com/d-li14/mobilenetv2.pytorch/master/pretrained/mobilenetv2_0.5-eaa6f9ad.pth"
 
 class ConvBNReLU(nn.Sequential):
     def __init__(self, in_planes, out_planes, kernel_size=3, stride=1, groups=1):
@@ -23,92 +18,137 @@ class ConvBNReLU(nn.Sequential):
             nn.ReLU(inplace=True)
         )
 
+def _make_divisible(v, divisor, min_value=None):
+    """
+    This function is taken from the original tf repo.
+    It ensures that all layers have a channel number that is divisible by 8
+    It can be seen here:
+    https://github.com/tensorflow/models/blob/master/research/slim/nets/mobilenet/mobilenet.py
+    :param v:
+    :param divisor:
+    :param min_value:
+    :return:
+    """
+    if min_value is None:
+        min_value = divisor
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    # Make sure that round down does not go down by more than 10%.
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
+
+def conv_3x3_bn(inp, oup, stride):
+    return nn.Sequential(
+        nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
+        nn.BatchNorm2d(oup),
+        nn.ReLU6(inplace=True)
+    )
+
+def conv_1x1_bn(inp, oup):
+    return nn.Sequential(
+        nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
+        nn.BatchNorm2d(oup),
+        nn.ReLU6(inplace=True)
+    )
+
 class InvertedResidual(nn.Module):
     def __init__(self, inp, oup, stride, expand_ratio):
         super(InvertedResidual, self).__init__()
-        self.stride = stride
         assert stride in [1, 2]
 
-        hidden_dim = int(round(inp * expand_ratio))
-        self.use_res_connect = self.stride == 1 and inp == oup
+        hidden_dim = round(inp * expand_ratio)
+        self.identity = stride == 1 and inp == oup
 
-        layers = []
-        if expand_ratio != 1:
-            # pw
-            layers.append(ConvBNReLU(inp, hidden_dim, kernel_size=1))
-        layers.extend([
-            # dw
-            ConvBNReLU(hidden_dim, hidden_dim, stride=stride, groups=hidden_dim),
-            # pw-linear
-            nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(oup),
-        ])
-        self.conv = nn.Sequential(*layers)
+        if expand_ratio == 1:
+            self.conv = nn.Sequential(
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+            )
+        else:
+            self.conv = nn.Sequential(
+                # pw
+                nn.Conv2d(inp, hidden_dim, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True),
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+            )
 
     def forward(self, x):
-        if self.use_res_connect:
+        if self.identity:
             return x + self.conv(x)
         else:
             return self.conv(x)
 
 class MobileNetV2(nn.Module):
-    def __init__(self, num_classes=1000, width_mult=1.0, inverted_residual_setting=None, round_nearest=8):
+    def __init__(self, num_classes=1000, width_mult=1.):
         super(MobileNetV2, self).__init__()
-        block = InvertedResidual
-        input_channel = 32
-        last_channel = 1280
-
-        if inverted_residual_setting is None:
-            inverted_residual_setting = [
-                # t, c, n, s
-                [1, 16, 1, 1],
-                [6, 24, 2, 2],
-                [6, 32, 3, 2],
-                [6, 64, 4, 2],
-                [6, 96, 3, 1],
-                [6, 160, 3, 2],
-                [6, 320, 1, 1],
-            ]
-
-        # only check the first element, assuming user knows t,c,n,s are required
-        if len(inverted_residual_setting) == 0 or len(inverted_residual_setting[0]) != 4:
-            raise ValueError("inverted_residual_setting should be non-empty "
-                             "or a 4-element list, got {}".format(inverted_residual_setting))
+        # setting of inverted residual blocks
+        self.cfgs = [
+            # t, c, n, s
+            [1,  16, 1, 1],
+            [6,  24, 2, 2],
+            [6,  32, 3, 2],
+            [6,  64, 4, 2],
+            [6,  96, 3, 1],
+            [6, 160, 3, 2],
+            [6, 320, 1, 1],
+        ]
 
         # building first layer
-        input_channel = _make_divisible(input_channel * width_mult, round_nearest)
-        self.last_channel = _make_divisible(last_channel * max(1.0, width_mult), round_nearest)
-        features = [ConvBNReLU(3, input_channel, stride=2)]
+        input_channel = _make_divisible(32 * width_mult, 4 if width_mult == 0.1 else 8)
+        layers = [conv_3x3_bn(3, input_channel, 2)]
         # building inverted residual blocks
-        for t, c, n, s in inverted_residual_setting:
-            output_channel = _make_divisible(c * width_mult, round_nearest)
+        block = InvertedResidual
+        for t, c, n, s in self.cfgs:
+            output_channel = _make_divisible(c * width_mult, 4 if width_mult == 0.1 else 8)
             for i in range(n):
-                stride = s if i == 0 else 1
-                features.append(block(input_channel, output_channel, stride, expand_ratio=t))
+                layers.append(block(input_channel, output_channel, s if i == 0 else 1, t))
                 input_channel = output_channel
+        self.features = nn.Sequential(*layers)
         # building last several layers
-        features.append(ConvBNReLU(input_channel, self.last_channel, kernel_size=1))
-        # make it nn.Sequential
-        self.features = nn.Sequential(*features)
+        output_channel = _make_divisible(1280 * width_mult, 4 if width_mult == 0.1 else 8) if width_mult > 1.0 else 1280
+        self.conv = conv_1x1_bn(input_channel, output_channel)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Linear(output_channel, num_classes)
 
-        # building classifier
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.2),
-            nn.Linear(self.last_channel, num_classes),
-        )
+        self._initialize_weights()
 
-        # weight initialization
+    def forward(self, x):
+        x = self.features(x)
+        x = self.conv(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+    def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
                 if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+                    m.bias.data.zero_()
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
             elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.zeros_(m.bias)
+                m.weight.data.normal_(0, 0.01)
+                m.bias.data.zero_()
+
+    def load_pretrain(self):
+        checkpoint = model_zoo.load_url(_MODEL_URL)
+        self.load_state_dict(checkpoint, strict=False)
 
     def forward(self, x):
         x = self.features(x)
@@ -231,11 +271,44 @@ class ASFF(nn.Module):
         out = self.expand(fused_out_reduced)
         return out
 
+def weights_init_kaiming(m):
+    classname = m.__class__.__name__
+    if classname.find('Linear') != -1:
+        nn.init.kaiming_normal_(m.weight, a=0, mode='fan_out')
+        nn.init.constant_(m.bias, 0.0)
+    elif classname.find('Conv2d') != -1:
+        nn.init.kaiming_normal_(m.weight, a=0, mode='fan_in')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)
+    elif classname.find('BatchNorm') != -1:
+        if m.affine:
+            nn.init.constant_(m.weight, 1.0)
+            nn.init.constant_(m.bias, 0.0)
+    else:
+        pass
+
 class MDFace(nn.Module):
-    def __init__(self, width_mult=1.0, in_size=(640, 640)):
+    """
+    Centernet + ttfnet
+    Backone：mobilenetv2(0.5，relu替换relu6)
+    neck：   4层FPN + ASFF融合 + SSH
+    后处理：  softnms
+    大小大概：2 Mb
+    代码层面优化：
+        1、查表法减均值除方差
+        2、图像W/H原比例缩放和填充input_ptr合并
+        3、尽量减少多余乘法，数组替换vector
+        (resize也有点耗时，听说Opencv4.2加速了)
+    https://github.com/whoNamedCody/Mask-Face-Detection
+    """
+    def __init__(self, width_mult=0.5, in_size=(800, 800), has_landmark=False):
         super(MDFace, self).__init__()
 
+        self.has_landmark = has_landmark
+
         net = MobileNetV2(width_mult=width_mult)
+        net.load_pretrain()
+
         features = net.features
         self.layer1= nn.Sequential(*features[0:4])
         self.layer2 = nn.Sequential(*features[4:7])
@@ -246,10 +319,28 @@ class MDFace(nn.Module):
         self.asff = ASFF(32, 32, in_size)
         self.ssh = SSH(32, 24)
         self.conv_bn = conv_bn(24, 24, 1)
-        self.head_hm = nn.Conv2d(24, 2, 1)
+        self.head_hm = nn.Conv2d(24, 1, 1)
         self.head_tlrb = nn.Conv2d(24, 4, 1)
-        self.head_landmark = nn.Conv2d(24, 10, 1)
-        self.head_hm.bias.data.fill_(-2.19)
+
+        if self.has_landmark: 
+            self.head_landmark = nn.Conv2d(24, 10, 1)
+
+        self.fpn.apply(weights_init_kaiming)
+        self.asff.apply(weights_init_kaiming)
+        self.ssh.apply(weights_init_kaiming)
+
+    def init_weights(self):
+
+        # Set the initial probability to avoid overflow at the beginning
+        prob = 0.01
+        d = -np.log((1 - prob) / prob)  # -2.19
+
+        # Load backbone weights from ImageNet
+        self.head_hm.init_normal(0.001, d)
+        self.head_tlrb.init_normal(0.001, 0)
+
+        if self.has_landmark:
+            self.head_landmark.init_normal(0.001, 0)
 
     def forward(self, x):
         enc0 = self.layer1(x) # 24
@@ -260,10 +351,13 @@ class MDFace(nn.Module):
         out = self.asff(out4, out3, out2, out1)
         out = self.ssh(out)
         out = self.conv_bn(out)
-        sigmoid_hm = self.head_hm(out).sigmoid()
-        tlrb = self.head_tlrb(out).exp()
-        lankmark = self.head_landmark(out)
-        return sigmoid_hm, tlrb, lankmark
+        sigmoid_hm = self.head_hm(out)
+        tlrb = self.head_tlrb(out)
+        
+        if self.has_landmark:
+            lankmark = self.head_landmark(out)
+            return sigmoid_hm, tlrb, lankmark
+        return sigmoid_hm, tlrb
 
 if __name__ == "__main__": 
 
