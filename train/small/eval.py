@@ -12,13 +12,14 @@ import numpy as np
 from dbface import DBFace
 from evaluate import evaluation
 
+
 # create logger
-trial_name = "small-H-dense-wide64-UCBA-keep12-noext-ignoresmall2"
+trial_name = "exp1-small-H-dense-wide64-UCBA-keep12-ignoresmall"
 jobdir = f"jobs/{trial_name}"
 log = logger.create(trial_name, f"{jobdir}/logs/eval.log")
 
 # load and init model
-model = DBFace(has_landmark=True, wide=64, has_ext=False, upmode="UCBA")
+model = DBFace(has_landmark=True, wide=64, has_ext=True, upmode="UCBA")
 model.load(f"{jobdir}/models/150.pth")
 model.eval()
 model.cuda()
@@ -26,10 +27,10 @@ model.cuda()
 # load dataset
 mean = [0.408, 0.447, 0.47]
 std = [0.289, 0.274, 0.278]
-files, anns = zip(*common.load_webface("webface/val/label.txt", "webface/WIDER_val/images"))
+files, anns = zip(*common.load_webface("/data/deeplearning/wider_face/val/label.txt", "/data/deeplearning/wider_face/WIDER_val/images"))
 
 # forward and summary
-prefix = "webface/WIDER_val/images/"
+prefix = "/data/deeplearning/wider_face/WIDER_val/images/"
 all_result_dict = {}
 total_file = len(files)
 
@@ -67,7 +68,6 @@ for i in range(total_file):
 
         for item in image_pred:
             f.write("{} {} {} {} {}\n".format(*item))
-
 
 # eval map of IoU0.5
 aps = evaluation.eval_map(all_result_dict, all=False)

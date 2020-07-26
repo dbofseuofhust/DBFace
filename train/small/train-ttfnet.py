@@ -14,6 +14,9 @@ import torchvision.transforms.functional as T
 from torch.utils.data import Dataset, DataLoader
 from dbface import DBFace
 from mdface import MDFace
+from torch_warmup_lr import WarmupLR
+from torch.optim.lr_scheduler import StepLR, ExponentialLR, MultiStepLR, ReduceLROnPlateau
+
 
 class LDataset(Dataset):
     """
@@ -165,8 +168,12 @@ class App(object):
         self.gpus = [0] # [0, 1, 2, 3], single gpu use [0], two gpus use [1] ...
         self.gpu_master = self.gpus[0]
 
-        self.model = DBFace(has_landmark=True, wide=64, has_ext=True, upmode="UCBA")
-        self.model.init_weights()
+        # for dbface
+        # self.model = DBFace(has_landmark=True, wide=64, has_ext=True, upmode="UCBA")
+        # self.model.init_weights()
+
+        # for mdface
+        self.model = MDFace(has_landmark=True)
 
         self.model = nn.DataParallel(self.model, device_ids=self.gpus)
         self.model.cuda(device=self.gpu_master)
@@ -178,19 +185,18 @@ class App(object):
         self.train_dataset = LDataset(labelfile, imagesdir, mean=self.mean, std=self.std, width=self.width, height=self.height)
         self.train_loader = DataLoader(dataset=self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=24)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+
+        self.scheduler = MultiStepLR(self.optimizer, milestones=[60,120], gamma=0.1)
+        # wrapping the scheduler, strategy could be one of ['cos', 'linear', 'constant']
+        # https://github.com/lehduong/torch-warmup-lr
+        self.scheduler = WarmupLR(self.scheduler, init_lr=self.lr, num_warmup=5, warmup_strategy='linear')
+
         self.per_epoch_batchs = len(self.train_loader)
         self.iter = 0
         self.epochs = 150
 
-    def set_lr(self, lr):
-
-        self.lr = lr
-        log.info(f"setting learning rate to: {lr}")
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-
     def train_epoch(self, epoch):
-        
+        self.scheduler.step()
         for indbatch, (images, heatmap_gt, heatmap_posweight, reg_tlrb, reg_mask, landmark_gt, landmark_mask, num_objs, keep_mask) in enumerate(self.train_loader):
 
             self.iter += 1
@@ -260,15 +266,12 @@ class App(object):
         self.model.train()
         for epoch in range(self.epochs):
 
-            if epoch in lr_scheduer:
-                self.set_lr(lr_scheduer[epoch])
-
             self.train_epoch(epoch)
             file = f"{jobdir}/models/{epoch + 1}.pth"
             common.mkdirs_from_file_path(file)
             torch.save(self.model.module.state_dict(), file)
 
-trial_name = "exp1-small-H-dense-wide64-UCBA-keep12-ignoresmall"
+trial_name = "exp1-ttfnet-keep12-ignoresmall"
 jobdir = f"jobs/{trial_name}"
 
 log = logger.create(trial_name, f"{jobdir}/logs/{trial_name}.log")

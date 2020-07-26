@@ -17,7 +17,6 @@ def _nms(heat, kernel=1):
     # hmax = heat
     # return hmax
 
-
 def _topk(scores, K=20):
     batch, cat, height, width = scores.size()
 
