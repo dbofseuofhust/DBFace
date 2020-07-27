@@ -71,6 +71,53 @@ def detect_images_giou_with_netout(output_hm, output_tlrb, output_landmark, thre
             imboxs.append(common.BBox(label=str(class_), xyrb=common.floatv([x1, y1, x2, y2]), score=scores[i].item(), landmark=boxlandmark))
     return imboxs
 
+def detect_images_giou_with_netout_fix_size(output_hm, output_tlrb, output_landmark, threshold=0.4, ibatch=0, scale_factor=None):
+
+    stride = 4
+    _, num_classes, hm_height, hm_width = output_hm.shape
+    hm = output_hm[ibatch].reshape(1, num_classes, hm_height, hm_width)
+    tlrb = output_tlrb[ibatch].cpu().data.numpy().reshape(1, num_classes * 4, hm_height, hm_width)
+    landmark = output_landmark[ibatch].cpu().data.numpy().reshape(1, num_classes * 10, hm_height, hm_width)
+
+    nmskey = _nms(hm, 3)
+    kscore, kinds, kcls, kys, kxs = _topk(nmskey, 2000)
+    kys = kys.cpu().data.numpy().astype(np.int)
+    kxs = kxs.cpu().data.numpy().astype(np.int)
+    kcls = kcls.cpu().data.numpy().astype(np.int)
+
+    key = [[], [], [], []]
+    for ind in range(kscore.shape[1]):
+        score = kscore[0, ind]
+        if score > threshold:
+            key[0].append(kys[0, ind])
+            key[1].append(kxs[0, ind])
+            key[2].append(score)
+            key[3].append(kcls[0, ind])
+
+    imboxs = []
+    if key[0] is not None and len(key[0]) > 0:
+        ky, kx = key[0], key[1]
+        classes = key[3]
+        scores = key[2]
+
+        for i in range(len(kx)):
+            class_ = classes[i]
+            cx, cy = kx[i], ky[i]
+            x1, y1, x2, y2 = tlrb[0, class_*4:(class_+1)*4, cy, cx]
+            x1, y1, x2, y2 = (np.array([cx, cy, cx, cy]) + np.array([-x1, -y1, x2, y2])) * stride
+
+            x5y5 = landmark[0, 0:10, cy, cx]
+            x5y5 = np.array(common.exp(x5y5 * 4))
+            x5y5 = (x5y5 + np.array([cx]*5 + [cy]*5)) * stride
+            boxlandmark = list(zip(x5y5[:5], x5y5[5:]))
+
+            x1 *= scale_factor[0]
+            y1 *= scale_factor[1]
+            x2 *= scale_factor[0]
+            y2 *= scale_factor[1]
+            imboxs.append(common.BBox(label=str(class_), xyrb=common.floatv([x1, y1, x2, y2]), score=scores[i].item(), landmark=boxlandmark))
+    return imboxs
+
 
 def detect_images_giou_with_retinaface_style_eval(output_hm, output_tlrb, output_landmark, threshold=0.4, ibatch=0):
 
@@ -118,6 +165,21 @@ def detect_image(model, image, mean, std, threshold=0.4):
     # center = F.max_pool2d(center, kernel_size=3, padding=1, stride=1)
     return detect_images_giou_with_netout(center, box, landmark, threshold)
 
+def detect_image_fix_size(model, image, mean, std, threshold=0.4):
+    image = common.pad(image)
+    h, w, _ = image.shape
+    image = cv2.resize(image, (800, 800))
+    image = ((image / 255 - mean) / std).astype(np.float32)
+    image = image.transpose(2, 0, 1)
+    image = torch.from_numpy(image).unsqueeze(0).cuda()
+    sy, sx = h / 800.0, w / 800.0
+    center, box, landmark = model(image)
+
+    center = center.sigmoid()
+    box = torch.exp(box)
+    # debug
+    # center = F.max_pool2d(center, kernel_size=3, padding=1, stride=1)
+    return detect_images_giou_with_netout_fix_size(center, box, landmark, threshold, scale_factor=(sx, sy))
 
 def detect_image_retinaface_style(model, image, mean, std, threshold=0.4):
     image = common.pad(image)

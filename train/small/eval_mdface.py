@@ -15,12 +15,12 @@ from evaluate import evaluation
 
 
 # create logger
-trial_name = "exp1-small-H-dense-wide64-UCBA-keep12-ignoresmall"
+trial_name = "exp1-ttfnet-keep12-ignoresmall"
 jobdir = f"jobs/{trial_name}"
 log = logger.create(trial_name, f"{jobdir}/logs/eval.log")
 
 # load and init model
-model = DBFace(has_landmark=True, wide=64, has_ext=True, upmode="UCBA")
+model = MDFace(has_landmark=True)
 
 model.load(f"{jobdir}/models/150.pth")
 model.eval()
@@ -45,7 +45,7 @@ for i in range(total_file):
 
     # load image and forward
     image = common.imread(file)
-    objs = eval_tool.detect_image(model, image, mean, std, 0.01)
+    objs = eval_tool.detect_image_fix_size(model, image, mean, std, 0.01)
     #objs = eval_tool.detect_image_retinaface_style(model, image, mean, std, 0.05)
     #objs = common.nms(objs, 0.3)
     

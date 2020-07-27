@@ -341,6 +341,10 @@ class MDFace(nn.Module):
 
         if self.has_landmark:
             self.head_landmark.init_normal(0.001, 0)
+    
+    def load(self, file):
+        checkpoint = torch.load(file, map_location="cpu")
+        self.load_state_dict(checkpoint)
 
     def forward(self, x):
         enc0 = self.layer1(x) # 24
